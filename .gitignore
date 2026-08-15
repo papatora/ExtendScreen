@@ -1,0 +1,27 @@
+# .NET
+windows/**/bin/
+windows/**/obj/
+*.user
+
+# Android / Gradle
+project/.gradle/
+project/**/build/
+project/local.properties
+project/.idea/
+project/*.iml
+project/captures/
+project/.cxx/
+
+# Vendored driver EDID generator scratch (dev tool, not part of the app)
+scratch_edidcheck/
+scratch_touchtest/
+
+# Internal dev notes - not part of the published project
+memory/
+
+# Local release build staging (built and uploaded to GitHub Releases manually, not committed)
+release_artifacts/
+
+# OS junk
+Thumbs.db
+.DS_Store

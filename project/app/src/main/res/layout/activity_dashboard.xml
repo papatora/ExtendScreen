@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:background="#12161C">
+
+    <TextView
+        android:id="@+id/txtStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="AzurateMirror — not connected"
+        android:textColor="#FFFFFF"
+        android:textSize="18sp"
+        android:paddingBottom="16dp" />
+
+    <EditText
+        android:id="@+id/edtHost"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="PC IP (e.g. 192.168.1.10) or 127.0.0.1 for USB"
+        android:textColorHint="#777"
+        android:textColor="#FFFFFF"
+        android:inputType="textUri"
+        android:text="127.0.0.1" />
+
+    <RadioGroup
+        android:id="@+id/rgMode"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="16dp">
+
+        <RadioButton
+            android:id="@+id/rbExtend"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:checked="true"
+            android:text="Extend (default)" />
+
+        <RadioButton
+            android:id="@+id/rbMirror"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:text="Mirror" />
+    </RadioGroup>
+
+    <CheckBox
+        android:id="@+id/chkTouchpad"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textColor="#CCCCCC"
+        android:checked="false"
+        android:text="Enable touchpad (tap/drag on screen controls the PC's mouse) - tick BEFORE connecting. The PC also needs its own matching checkbox on." />
+
+    <Button
+        android:id="@+id/btnConnect"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Connect (port 47632)" />
+
+    <Button
+        android:id="@+id/btnReadme"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:background="@android:color/transparent"
+        android:textColor="#4FC3F7"
+        android:text="Readme — how to connect" />
+
+</LinearLayout>
