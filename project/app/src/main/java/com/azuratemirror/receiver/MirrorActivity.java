@@ -10,6 +10,7 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
@@ -60,6 +61,24 @@ public class MirrorActivity extends AppCompatActivity implements SurfaceHolder.C
 
         surfaceView = findViewById(R.id.surfaceMirror);
         surfaceView.getHolder().addCallback(this);
+
+        // Self-healing against a race that only reproduced over WiFi (not USB): applyLetterboxSizing
+        // reads the parent's getWidth()/getHeight() at whatever moment VIDEO_CONFIG happens to
+        // arrive, but the immersive-fullscreen system-bar-hide triggered in applyImmersiveFullscreen()
+        // above is an ASYNC animation - if the parent's final post-immersive size hasn't settled
+        // yet at that exact moment (more likely to be caught mid-transition under WiFi's network
+        // round-trip timing than USB's near-instant loopback), the box gets sized against a
+        // transient/wrong parent height and never recalculated, leaving a visible letterbox strip
+        // that should have gone away once the bars finished hiding. This listener re-applies the
+        // same sizing every time the parent's actual layout changes for any reason (immersive mode
+        // settling, later system-bar swipe reveal/hide, rotation, etc.), so it self-corrects
+        // regardless of exactly when VIDEO_CONFIG happened to race the animation.
+        View mirrorParent = (View) surfaceView.getParent();
+        if (mirrorParent != null) {
+            mirrorParent.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+                if (hasCachedConfig) applyLetterboxSizing(cfgWidth, cfgHeight);
+            });
+        }
 
         // Network connection lifecycle is tied to the Activity, NOT the Surface - a surface
         // can be destroyed/recreated by the window manager without the connection needing to drop.
