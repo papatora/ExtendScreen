@@ -28,6 +28,26 @@ public static class VirtualDisplayManager
     /// <summary>Finds the virtual display's DXGI adapter/output by matching its monitor's PNP hardware ID.</summary>
     public static DxgiOutputRef? FindVirtualOutput() => FindOutputByGdiNamePredicate(gdiName => MonitorDeviceIdContains(gdiName, VirtualMonitorIdMarker));
 
+    /// <summary>
+    /// Finds the virtual display's GDI device name via EnumDisplayDevices alone, without the DXGI
+    /// cross-reference FindVirtualOutput does. EnumDisplayDevices enumerates hardware the driver
+    /// knows about regardless of desktop-attach state, so this works even when the display has
+    /// been DetachFromDesktop'd (DXGI's own output enumeration may not list detached displays) -
+    /// needed to know what name to pass to AttachToDesktop before DXGI can see it again.
+    /// </summary>
+    public static string? FindVirtualDisplayGdiName()
+    {
+        var dd = new DISPLAY_DEVICE();
+        dd.cb = Marshal.SizeOf(dd);
+        for (uint i = 0; EnumDisplayDevices(null, i, ref dd, 0); i++)
+        {
+            if (MonitorDeviceIdContains(dd.DeviceName, VirtualMonitorIdMarker))
+                return dd.DeviceName;
+            dd.cb = Marshal.SizeOf(dd);
+        }
+        return null;
+    }
+
     /// <summary>Finds the real primary display's DXGI adapter/output (the one Windows marks primary via GDI).</summary>
     public static DxgiOutputRef? FindPrimaryOutput() => FindOutputByGdiNamePredicate(IsPrimaryGdiDevice);
 
@@ -129,23 +149,74 @@ public static class VirtualDisplayManager
     }
 
     /// <summary>
-    /// Enables the virtual display so it appears as display "4" in Windows again - called from
-    /// BtnStart before the capture pipeline resolves its target output. One UAC prompt per app
-    /// Start, not per tablet reconnect (see DisableDriver's doc comment for why that granularity
-    /// was chosen over per-connect/disconnect).
+    /// DEPRECATED - do not call. Toggling the PnP device itself (pnputil enable/disable) via UAC
+    /// on every single app Start/Stop repeatedly corrupted the virtual display's device node in
+    /// practice (ended up "The device is not connected", needing a full driver reinstall to
+    /// recover - happened 3 times in one day). Kept only so any stray caller fails loudly instead
+    /// of silently doing something destructive. Use DetachFromDesktop/AttachToDesktop instead -
+    /// those change display TOPOLOGY only (like Windows' own "Disconnect this display"), never
+    /// touch the PnP device, and don't need admin/UAC at all.
     /// </summary>
-    public static bool EnableDriver() => RunElevatedPnputil($"pnputil /enable-device \"{VddDeviceInstanceId}\"");
+    [Obsolete("Corrupts the VDD device node under real-world UAC-failure conditions - use DetachFromDesktop/AttachToDesktop instead.", error: true)]
+    public static bool EnableDriver() => throw new InvalidOperationException("EnableDriver is disabled - see DetachFromDesktop/AttachToDesktop.");
+
+    [Obsolete("Corrupts the VDD device node under real-world UAC-failure conditions - use DetachFromDesktop/AttachToDesktop instead.", error: true)]
+    public static bool DisableDriver() => throw new InvalidOperationException("DisableDriver is disabled - see DetachFromDesktop/AttachToDesktop.");
 
     /// <summary>
-    /// Disables the virtual display so it disappears from Windows entirely (Display Settings,
-    /// and - the actual motivating complaint - the mouse can no longer wander into a "display 4"
-    /// region that isn't rendering anything when no session is active). Called from BtnStop's
-    /// pipeline cleanup, once capture has already torn down. Deliberately scoped to Start/Stop
-    /// rather than per tablet connect/disconnect: pnputil disable/enable each need their own UAC
-    /// elevation, and firing that on every reconnect (WiFi drop, app backgrounded, etc.) would be
-    /// far more disruptive than the mouse-wandering problem it's meant to fix.
+    /// Removes the virtual display from the desktop (Display Settings, mouse can't wander onto
+    /// it) WITHOUT touching the underlying PnP device at all - this is the same mechanism as
+    /// Windows' own Settings > Display > "Disconnect this display", just driven programmatically.
+    /// No admin/UAC needed (a user can always reconfigure their own session's display topology).
+    /// Safe to call as often as needed (every Stop, every disconnect) - unlike the old pnputil
+    /// enable/disable dance, this has no way to corrupt the driver's device node since the device
+    /// itself never changes state, only whether it's part of the desktop.
     /// </summary>
-    public static bool DisableDriver() => RunElevatedPnputil($"pnputil /disable-device \"{VddDeviceInstanceId}\"");
+    public static bool DetachFromDesktop(string gdiDeviceName)
+    {
+        var mode = new DEVMODE();
+        mode.dmSize = (short)Marshal.SizeOf(mode);
+        mode.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
+        mode.dmPelsWidth = 0;
+        mode.dmPelsHeight = 0;
+
+        int result = ChangeDisplaySettingsEx(gdiDeviceName, ref mode, IntPtr.Zero, CDS_UPDATEREGISTRY | CDS_NORESET, IntPtr.Zero);
+        ApplyPendingTopology();
+        return result == DISP_CHANGE_SUCCESSFUL;
+    }
+
+    /// <summary>Re-adds the virtual display to the desktop at the given resolution - the inverse
+    /// of DetachFromDesktop, same non-destructive topology-only mechanism.</summary>
+    public static bool AttachToDesktop(string gdiDeviceName, int width, int height, int refreshHz)
+    {
+        var mode = new DEVMODE();
+        mode.dmSize = (short)Marshal.SizeOf(mode);
+        mode.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+        mode.dmPelsWidth = width;
+        mode.dmPelsHeight = height;
+        mode.dmDisplayFrequency = refreshHz;
+
+        int result = ChangeDisplaySettingsEx(gdiDeviceName, ref mode, IntPtr.Zero, CDS_UPDATEREGISTRY | CDS_NORESET, IntPtr.Zero);
+        ApplyPendingTopology();
+        return result == DISP_CHANGE_SUCCESSFUL;
+    }
+
+    /// <summary>
+    /// CDS_NORESET above stages the change without applying it immediately (lets several display
+    /// changes batch into one flicker) - this commits whatever's staged, matching the documented
+    /// ChangeDisplaySettingsEx(NULL, NULL, NULL, 0, NULL) "apply now" pattern.
+    ///
+    /// MUST go through the IntPtr-typed overload below, not the DEVMODE-by-ref one used above -
+    /// a `ref DEVMODE` parameter can never marshal to a true null pointer, so calling the by-ref
+    /// overload with a zeroed-but-non-null DEVMODE (dmFields=0) makes Win32 see "apply zero field
+    /// changes", a harmless no-op that returns DISP_CHANGE_SUCCESSFUL without ever committing the
+    /// staged CDS_NORESET registry change. Confirmed via research this was exactly why an earlier
+    /// version of this method silently failed to detach anything despite reporting success.
+    /// </summary>
+    private static void ApplyPendingTopology()
+    {
+        ChangeDisplaySettingsExNull(IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero);
+    }
 
     /// <summary>
     /// Runs a PowerShell command elevated via UAC "runas". Uses -EncodedCommand (base64 UTF-16LE)
@@ -186,13 +257,21 @@ public static class VirtualDisplayManager
     private static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int ChangeDisplaySettingsEx(string lpszDeviceName, ref DEVMODE lpDevMode, IntPtr hwnd, uint dwflags, IntPtr lParam);
+    private static extern int ChangeDisplaySettingsEx(string? lpszDeviceName, ref DEVMODE lpDevMode, IntPtr hwnd, uint dwflags, IntPtr lParam);
+
+    /// <summary>Separate overload purely so the "apply pending changes" call can pass a genuine
+    /// NULL for both device name and DEVMODE - see ApplyPendingTopology's doc comment for why
+    /// the `ref DEVMODE` overload above can never do that.</summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "ChangeDisplaySettingsExW")]
+    private static extern int ChangeDisplaySettingsExNull(IntPtr lpszDeviceName, IntPtr lpDevMode, IntPtr hwnd, uint dwflags, IntPtr lParam);
 
     private const uint DISPLAY_DEVICE_PRIMARY_DEVICE = 0x4;
+    private const int DM_POSITION = 0x00000020;
     private const int DM_PELSWIDTH = 0x80000;
     private const int DM_PELSHEIGHT = 0x100000;
     private const int DM_DISPLAYFREQUENCY = 0x400000;
     private const uint CDS_UPDATEREGISTRY = 0x00000001;
+    private const uint CDS_NORESET = 0x10000000;
     private const int DISP_CHANGE_SUCCESSFUL = 0;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

@@ -224,16 +224,24 @@ public partial class MainWindow : Window
 
         try
         {
-            // Re-enable the virtual display (BtnStop's cleanup disables it - see
-            // VirtualDisplayManager.DisableDriver's doc comment for why). Runs on this background
-            // pipeline thread, not the UI thread, so the UAC prompt doesn't freeze the window.
-            // Harmless no-op via pnputil if it's already enabled (e.g. app was killed without
-            // going through Stop last time).
-            AppendLog("Enabling virtual display...");
-            if (VirtualDisplayManager.EnableDriver())
-                AppendLog("Virtual display enabled.");
+            // Re-attach the virtual display to the desktop (BtnStop's cleanup detaches it - see
+            // VirtualDisplayManager.DetachFromDesktop's doc comment). This is a display-topology
+            // change only (same as Windows' own "Disconnect this display"), NOT a PnP device
+            // toggle - no UAC, and no way to corrupt the driver's device node the way the old
+            // pnputil enable/disable dance repeatedly did in practice.
+            string? gdiName = VirtualDisplayManager.FindVirtualDisplayGdiName();
+            if (gdiName != null)
+            {
+                AppendLog("Attaching virtual display to desktop...");
+                if (VirtualDisplayManager.AttachToDesktop(gdiName, TargetWidth, TargetHeight, TargetRefreshHz))
+                    AppendLog("Virtual display attached.");
+                else
+                    AppendLog("Could not attach virtual display - Extend mode will fail to find its target.");
+            }
             else
-                AppendLog("Could not enable virtual display (UAC declined or pnputil failed) - Extend mode will fail to find its target.");
+            {
+                AppendLog("Virtual display driver not found at all (not just detached) - is it installed? See docs/PROTOCOL.md / memory/00_LIVE_STATE.md.");
+            }
 
             currentOutput = ResolveTargetOutput(_mode);
             duplicator = new DesktopDuplicator(currentOutput.AdapterIndex, currentOutput.OutputIndex);
@@ -522,14 +530,19 @@ public partial class MainWindow : Window
                 AppendLog(removeResult.Success ? "adb reverse tunnel removed." : $"adb reverse --remove failed (non-fatal): {removeResult.Output}");
             }
 
-            // Disable the virtual display now that capture has fully torn down - otherwise it
-            // sits in Windows as "display 4" indefinitely with nothing rendering into it, which
-            // is exactly the "mouse wanders into a dead display" complaint this exists to fix.
-            AppendLog("Disabling virtual display...");
-            if (VirtualDisplayManager.DisableDriver())
-                AppendLog("Virtual display disabled.");
-            else
-                AppendLog("Could not disable virtual display (UAC declined or pnputil failed) - display 4 will stay visible until next reboot/manual disable.");
+            // Detach the virtual display from the desktop now that capture has fully torn down -
+            // otherwise it sits in Windows as "display 4" indefinitely with nothing rendering
+            // into it (the mouse-wanders-into-a-dead-display complaint this exists to fix).
+            // Topology-only change (like Windows' own "Disconnect this display"), NOT a PnP
+            // device toggle - no UAC, and can't corrupt the driver's device node.
+            string? gdiNameToDetach = VirtualDisplayManager.FindVirtualDisplayGdiName();
+            if (gdiNameToDetach != null)
+            {
+                AppendLog("Detaching virtual display from desktop...");
+                AppendLog(VirtualDisplayManager.DetachFromDesktop(gdiNameToDetach)
+                    ? "Virtual display detached."
+                    : "Could not detach virtual display - display 4 will stay visible until next Start.");
+            }
 
             SetStatus("Stopped");
             Dispatcher.Invoke(() =>
