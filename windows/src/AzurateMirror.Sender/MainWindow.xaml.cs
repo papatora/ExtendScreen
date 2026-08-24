@@ -53,6 +53,28 @@ public partial class MainWindow : Window
             Loaded += (_, _) => BtnStart_Click(this, new RoutedEventArgs());
     }
 
+    /// <summary>Listens for App's single-instance "please show yourself" broadcast (see
+    /// App.xaml.cs) so a second launch attempt restores this window - out of the tray if it's
+    /// hidden there, or just brings it to front otherwise - instead of the new process spawning
+    /// its own competing capture pipeline.</summary>
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        var source = (System.Windows.Interop.HwndSource?)PresentationSource.FromVisual(this);
+        source?.AddHook(WndProc);
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == App.WM_ShowAzurateMirror)
+        {
+            if (_trayIcon != null) RestoreFromTray();
+            else { Show(); WindowState = WindowState.Normal; Activate(); }
+            handled = true;
+        }
+        return IntPtr.Zero;
+    }
+
     /// <summary>Shows this PC's LAN IP(s) next to the port so WiFi-mode users know exactly what
     /// to type into the tablet's Connect screen - previously this info existed nowhere in the UI,
     /// forcing users to run `ipconfig` themselves with no guidance on which adapter to read.</summary>
@@ -88,15 +110,21 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// X button behavior is user-configurable (Task #13): if "Minimize to tray" is checked, closing
-    /// the window hides it and keeps the capture pipeline running in the background via a tray icon
-    /// instead of tearing the whole app down - lets the mirror session survive an accidental/habitual
-    /// click on X. Exit from the tray context menu (or the checkbox being off) does a real shutdown.
+    /// X button behavior is user-configurable (Task #13): if "Minimize to tray" is checked AND a
+    /// mirror session is actually running, closing the window hides it and keeps the capture
+    /// pipeline alive in the background via a tray icon instead of tearing the whole app down -
+    /// lets the mirror session survive an accidental/habitual click on X. But the tray hide is only
+    /// worth it while something is actually running in the background - if the session is already
+    /// Stopped (or never started), there's nothing left to keep alive, so X always fully closes
+    /// regardless of the checkbox. This also stops the checkbox from silently trapping a
+    /// stopped/idle window in the tray, which made it easy to forget an old instance was still
+    /// there and launch a second one on top of it.
     /// </summary>
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
-        AppendLog($"Window_Closing fired: _exitRequested={_exitRequested} ChkCloseToTray.IsChecked={ChkCloseToTray.IsChecked}");
-        if (_exitRequested || ChkCloseToTray.IsChecked != true)
+        bool minimizeToTray = ChkCloseToTray.IsChecked == true && _running;
+        AppendLog($"Window_Closing fired: _exitRequested={_exitRequested} ChkCloseToTray.IsChecked={ChkCloseToTray.IsChecked} _running={_running}");
+        if (_exitRequested || !minimizeToTray)
         {
             _trayIcon?.Dispose();
             _running = false;
@@ -110,7 +138,7 @@ public partial class MainWindow : Window
 
     private void Window_StateChanged(object? sender, EventArgs e)
     {
-        if (WindowState == WindowState.Minimized && ChkCloseToTray.IsChecked == true)
+        if (WindowState == WindowState.Minimized && ChkCloseToTray.IsChecked == true && _running)
         {
             Hide();
             ShowTrayIcon();
