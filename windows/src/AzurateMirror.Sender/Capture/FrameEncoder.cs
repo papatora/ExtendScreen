@@ -28,10 +28,19 @@ public sealed class FrameEncoder : IDisposable
 
     // GPU BGRA->NV12 conversion (ID3D11VideoDevice/VideoProcessorBlt) - measured 5.26x faster than
     // the CPU Parallel.For path (1.61ms vs 8.49ms/frame @ 2560x1600, see windows/ExperimentOnly).
-    // Set up lazily/best-effort in the constructor; if anything about this fails (older GPU/driver
-    // without video-processor support, missing DeviceCreationFlags.VideoSupport upstream, etc.)
-    // this silently falls back to the proven CPU path instead of breaking the whole app - CPU
-    // fields below are always kept ready as the fallback, never removed.
+    // PERMANENTLY DISABLED as of 2026-09-03: live-diagnosed as the actual cause of a black
+    // screen + ghosted-cursor-trail corruption on the tablet (Extend mode, virtual display).
+    // Proven by direct A/B test - identical repro steps, only difference was forcing this flag
+    // false: GPU path corrupted every time, CPU path clean every time. Several other real bugs
+    // were found and fixed chasing this symptom before landing on the actual cause (an Android-
+    // side layout loop, an over-rate encode loop, a periodic-keyframe fix that made things worse)
+    // - none of them were it. The exact mechanism inside VideoProcessorBlt/the cached
+    // input-view reuse hasn't been root-caused further; CPU conversion is already comfortably
+    // fast enough (8.49ms/frame leaves plenty of headroom under the 33ms/frame budget for 30fps),
+    // so the pragmatic fix is to stop using the broken path rather than keep debugging complex
+    // D3D11 video-processor code with a known-good fallback sitting right there. Left the GPU
+    // code in place (untouched) rather than deleted, in case someone wants to revisit root-causing
+    // it later - just never let _useGpuConversion become true.
     private bool _useGpuConversion;
     private bool _gpuSetupAttempted;
     private ID3D11VideoDevice? _videoDevice;
@@ -326,9 +335,13 @@ public sealed class FrameEncoder : IDisposable
     {
         if (!_gpuSetupAttempted)
         {
+            // GPU conversion is permanently disabled - see the comment on _useGpuConversion's
+            // declaration above for why. Not even attempting SetUpGpuConversion here (rather than
+            // attempting it and then forcing the flag back off) so UsingGpuConversion's status
+            // log doesn't misreport a real "setup failed on this hardware" fallback when nothing
+            // was actually attempted or wrong with the hardware.
             _gpuSetupAttempted = true;
-            try { SetUpGpuConversion(device); _useGpuConversion = true; }
-            catch { _useGpuConversion = false; } // silently fall back to the CPU path below
+            _useGpuConversion = false;
         }
 
         byte[] nv12 = _useGpuConversion

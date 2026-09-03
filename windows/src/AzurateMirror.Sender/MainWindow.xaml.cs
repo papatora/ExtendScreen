@@ -351,6 +351,19 @@ public partial class MainWindow : Window
             // so the outer finally can dispose it too.)
             var forceFrameTimer = Stopwatch.StartNew();
 
+            // Encode-rate throttle. DXGI Desktop Duplication's AcquireNextFrame treats mouse
+            // cursor movement as a "frame changed" event on its own, and on a virtual display
+            // showing an empty desktop (nothing else drawing) that's nearly every AcquireNextFrame
+            // call - observed live spiking to 69/106/121 fps against an encoder configured for
+            // 30fps (see FrameEncoder.ConfigureTypes' frameRate param). Kept as a sane correctness
+            // fix (feeding a hardware MFT far outside its configured timebase is never a good
+            // idea) even though it turned out NOT to be the cause of the ghosting bug - that was
+            // an Android-side infinite layout loop (see MirrorActivity.java) compounded by a
+            // periodic-keyframe "fix" that made it worse by forcing repeated full decoder
+            // reconfigures (removed, see note further down).
+            var encodeThrottle = Stopwatch.StartNew();
+            const long MinFrameIntervalMs = 33; // ~30fps, matches FrameEncoder's configured fps
+
             void EncodeAndSend(Vortice.Direct3D11.ID3D11Texture2D texture, ulong ts)
             {
                 var units = encoder!.EncodeFrame(duplicator!.Device, duplicator.Context, texture, ts);
@@ -408,6 +421,17 @@ public partial class MainWindow : Window
                     }
                 }
 
+                // NOTE: a periodic (every few seconds) forced keyframe used to live here, based on
+                // a diagnosis that turned out to be wrong - the actual ghosting/black-screen bug
+                // was an infinite Android-side layout loop (fixed in MirrorActivity.java), not
+                // encoder GOP corruption. Removed because it was actively harmful: setting
+                // _configSent = false resends VIDEO_CONFIG, and Android's onVideoConfig() does a
+                // FULL MediaCodec decoder reconfigure on every VIDEO_CONFIG - tearing down and
+                // recreating the decoder's Surface connection every few seconds, which is exactly
+                // what was producing the BufferQueueProducer "cancelBuffer: slot not owned by
+                // producer" errors and visible corruption. _keyframeRequested is still used for a
+                // genuine client resume (see TouchReceived/mode-change wiring), where a full
+                // VIDEO_CONFIG + decoder reconfigure is actually correct and necessary.
                 if (_keyframeRequested)
                 {
                     _keyframeRequested = false;
@@ -450,13 +474,42 @@ public partial class MainWindow : Window
                     AppendLog($"Capture fault, recovering: {ex.Message}");
                     duplicator.Dispose();
                     encoder.Dispose();
-                    Thread.Sleep(200);
-                    duplicator = new DesktopDuplicator(currentOutput.AdapterIndex, currentOutput.OutputIndex);
+
+                    // Recreating DesktopDuplicator (IDXGIOutput1.DuplicateOutput) can ITSELF fail -
+                    // observed live as E_ACCESSDENIED, most likely the desktop being in a secure
+                    // state (lock screen / UAC prompt / screensaver) at that exact moment, which
+                    // DXGI refuses to duplicate by design. A single failed attempt used to propagate
+                    // straight out of this catch block (it's not re-caught by its own catch),
+                    // killing the whole pipeline - and the cleanup that runs afterward could ALSO
+                    // fail to detach the now-orphaned virtual display, leaving it visible in Windows
+                    // with nothing rendering into it: a black screen where only the DWM-composited
+                    // mouse cursor (a separate hardware overlay, unaffected by the dead pipeline)
+                    // still moves and ghosts. Retrying here instead of giving up after one attempt
+                    // means a transient state (lock screen etc.) self-resolves once the desktop
+                    // becomes capturable again, without ever tearing the session down.
+                    DesktopDuplicator? recreated = null;
+                    int attempt = 0;
+                    while (_running && recreated == null)
+                    {
+                        attempt++;
+                        Thread.Sleep(attempt == 1 ? 200 : 2000);
+                        try
+                        {
+                            recreated = new DesktopDuplicator(currentOutput.AdapterIndex, currentOutput.OutputIndex);
+                        }
+                        catch (Exception retryEx)
+                        {
+                            AppendLog($"Recovery attempt {attempt} failed, retrying: {retryEx.Message}");
+                        }
+                    }
+                    if (recreated == null) return; // _running went false while retrying - normal Stop, not a crash.
+
+                    duplicator = recreated;
                     encoder = new FrameEncoder(duplicator.Width, duplicator.Height);
                     lastGoodFrame?.Dispose();
                     lastGoodFrame = null;
                     _configSent = false;
-                    AppendLog($"Recovered. Capture target: {currentOutput.AdapterDescription} [{currentOutput.GdiDeviceName}]");
+                    AppendLog($"Recovered after {attempt} attempt(s). Capture target: {currentOutput.AdapterDescription} [{currentOutput.GdiDeviceName}]");
                     continue;
                 }
 
@@ -474,6 +527,18 @@ public partial class MainWindow : Window
                     }
                     continue;
                 }
+
+                if (encodeThrottle.ElapsedMilliseconds < MinFrameIntervalMs)
+                {
+                    // A real change happened (not a timeout), but we've already encoded one this
+                    // interval - drop this one on the floor rather than overrunning the encoder's
+                    // configured frame rate. DXGI still needs ReleaseFrame regardless of whether we
+                    // use the frame, or the next AcquireNextFrame call would block/fail.
+                    frame.Dispose();
+                    duplicator.ReleaseFrame();
+                    continue;
+                }
+                encodeThrottle.Restart();
 
                 try
                 {
@@ -524,7 +589,7 @@ public partial class MainWindow : Window
                     _loggedGpuConversionStatus = true;
                     AppendLog(usingGpu
                         ? "Color conversion: GPU (VideoProcessorBlt) - active"
-                        : "Color conversion: CPU fallback (GPU path failed setup on this hardware)");
+                        : "Color conversion: CPU (GPU path permanently disabled - see FrameEncoder.cs)");
                 }
 
                 if (fpsTimer.ElapsedMilliseconds >= 1000)
@@ -567,9 +632,20 @@ public partial class MainWindow : Window
             if (gdiNameToDetach != null)
             {
                 AppendLog("Detaching virtual display from desktop...");
-                AppendLog(VirtualDisplayManager.DetachFromDesktop(gdiNameToDetach)
+                // Can transiently fail for the same reason capture recovery above can (desktop in
+                // a secure state right when a crash unwound into this cleanup) - a single failed
+                // attempt used to just give up and leave the display orphaned/attached with
+                // nothing rendering into it. A few retries covers the transient case without
+                // blocking Stop/exit indefinitely if something is genuinely wrong.
+                bool detached = false;
+                for (int i = 0; i < 3 && !detached; i++)
+                {
+                    if (i > 0) Thread.Sleep(500);
+                    detached = VirtualDisplayManager.DetachFromDesktop(gdiNameToDetach);
+                }
+                AppendLog(detached
                     ? "Virtual display detached."
-                    : "Could not detach virtual display - display 4 will stay visible until next Start.");
+                    : "Could not detach virtual display after 3 attempts - display 4 will stay visible until next Start.");
             }
 
             SetStatus("Stopped");

@@ -199,6 +199,17 @@ public class MirrorActivity extends AppCompatActivity implements SurfaceHolder.C
                 targetW = Math.round(parentH * videoAspect);
             }
 
+            // Bail out if this is already the surface's current size. setLayoutParams() itself
+            // triggers a new layout pass, which re-fires the OnGlobalLayoutListener added in
+            // onCreate() (that's what lets this self-heal after the async immersive-fullscreen
+            // animation settles) - without this guard, applying the SAME size back every time
+            // creates a tight feedback loop (observed live: 30+ layout passes within 265ms), each
+            // one tearing down and recreating the SurfaceView's Surface out from under the decoder
+            // that's actively rendering into it. That's what was actually producing the black
+            // screen + ghosted-cursor corruption on the tablet - not the sender pipeline at all.
+            ViewGroup.LayoutParams currentLp = surfaceView.getLayoutParams();
+            if (currentLp != null && currentLp.width == targetW && currentLp.height == targetH) return;
+
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(targetW, targetH);
             lp.gravity = android.view.Gravity.CENTER;
             surfaceView.setLayoutParams(lp);
