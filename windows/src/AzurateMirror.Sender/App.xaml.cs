@@ -1,7 +1,10 @@
 using System;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Threading;
 
 namespace AzurateMirror.Sender;
 
@@ -31,6 +34,10 @@ public partial class App : System.Windows.Application
     /// two capture pipelines fighting over the same virtual display. A second launch attempt asks
     /// the existing instance to show itself instead, then exits immediately without ever creating
     /// a window.</summary>
+    // Where crash reports land - a subfolder next to the rolling session log (MainWindow.LogFilePath
+    // lives directly in %TEMP%) so both are easy to find together.
+    private static readonly string CrashLogDir = Path.Combine(Path.GetTempPath(), "AzurateMirrorV2_Crashes");
+
     protected override void OnStartup(StartupEventArgs e)
     {
         // Checked BEFORE base.OnStartup(e): that base call is what actually creates and shows the
@@ -44,7 +51,51 @@ public partial class App : System.Windows.Application
             return;
         }
 
+        // Previously an unhandled exception anywhere outside the pipeline thread's own try/catch
+        // (which already logs "Pipeline error: ...") just silently killed the process - no crash
+        // dump most of the time (WER doesn't always fire for this in practice), nothing in the
+        // rolling session log either since the crash itself is what happened right after the last
+        // line written. These three cover the realistic places an unhandled exception can
+        // originate: any background thread, the WPF UI/Dispatcher thread, and an unobserved async
+        // Task fault. Each writes a timestamped report to CrashLogDir with the full exception
+        // (message/stack/inner exceptions) AND the tail of the current session's log, so what led
+        // up to the crash is visible without having to reproduce it live.
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            WriteCrashLog("AppDomain.UnhandledException", args.ExceptionObject as Exception);
+        DispatcherUnhandledException += (_, args) =>
+            WriteCrashLog("DispatcherUnhandledException (UI thread)", args.Exception);
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+            WriteCrashLog("TaskScheduler.UnobservedTaskException", args.Exception);
+
         base.OnStartup(e);
+    }
+
+    private static void WriteCrashLog(string source, Exception? ex)
+    {
+        try
+        {
+            Directory.CreateDirectory(CrashLogDir);
+            string path = Path.Combine(CrashLogDir, $"crash_{DateTime.Now:yyyyMMdd_HHmmss}.log");
+
+            string sessionLogTail = "(session log not found or unreadable)";
+            try
+            {
+                if (File.Exists(AzurateMirror.Sender.MainWindow.LogFilePath))
+                {
+                    var lines = File.ReadAllLines(AzurateMirror.Sender.MainWindow.LogFilePath);
+                    sessionLogTail = string.Join("\n", lines[Math.Max(0, lines.Length - 200)..]);
+                }
+            }
+            catch { /* best-effort - the exception details below are the important part */ }
+
+            File.WriteAllText(path,
+                $"AzurateMirror.Sender crash report\n" +
+                $"Time: {DateTime.Now:O}\n" +
+                $"Source: {source}\n\n" +
+                $"--- Exception ---\n{(ex?.ToString() ?? "(no exception object available)")}\n\n" +
+                $"--- Last ~200 lines of session log before crash ---\n{sessionLogTail}\n");
+        }
+        catch { /* if even crash logging fails, there's nothing more we can safely do here */ }
     }
 
     protected override void OnExit(ExitEventArgs e)

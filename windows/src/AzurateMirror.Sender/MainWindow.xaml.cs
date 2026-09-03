@@ -351,19 +351,6 @@ public partial class MainWindow : Window
             // so the outer finally can dispose it too.)
             var forceFrameTimer = Stopwatch.StartNew();
 
-            // Encode-rate throttle. DXGI Desktop Duplication's AcquireNextFrame treats mouse
-            // cursor movement as a "frame changed" event on its own, and on a virtual display
-            // showing an empty desktop (nothing else drawing) that's nearly every AcquireNextFrame
-            // call - observed live spiking to 69/106/121 fps against an encoder configured for
-            // 30fps (see FrameEncoder.ConfigureTypes' frameRate param). Kept as a sane correctness
-            // fix (feeding a hardware MFT far outside its configured timebase is never a good
-            // idea) even though it turned out NOT to be the cause of the ghosting bug - that was
-            // an Android-side infinite layout loop (see MirrorActivity.java) compounded by a
-            // periodic-keyframe "fix" that made it worse by forcing repeated full decoder
-            // reconfigures (removed, see note further down).
-            var encodeThrottle = Stopwatch.StartNew();
-            const long MinFrameIntervalMs = 33; // ~30fps, matches FrameEncoder's configured fps
-
             void EncodeAndSend(Vortice.Direct3D11.ID3D11Texture2D texture, ulong ts)
             {
                 var units = encoder!.EncodeFrame(duplicator!.Device, duplicator.Context, texture, ts);
@@ -528,18 +515,6 @@ public partial class MainWindow : Window
                     continue;
                 }
 
-                if (encodeThrottle.ElapsedMilliseconds < MinFrameIntervalMs)
-                {
-                    // A real change happened (not a timeout), but we've already encoded one this
-                    // interval - drop this one on the floor rather than overrunning the encoder's
-                    // configured frame rate. DXGI still needs ReleaseFrame regardless of whether we
-                    // use the frame, or the next AcquireNextFrame call would block/fail.
-                    frame.Dispose();
-                    duplicator.ReleaseFrame();
-                    continue;
-                }
-                encodeThrottle.Restart();
-
                 try
                 {
                     if (lastGoodFrame is null || lastGoodFrame.Description.Width != (uint)duplicator.Width || lastGoodFrame.Description.Height != (uint)duplicator.Height)
@@ -684,7 +659,10 @@ public partial class MainWindow : Window
         Dispatcher.Invoke(() => TxtTransport.Text = text);
     }
 
-    private static readonly string LogFilePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "azuratemirror_v2_test.log");
+    // Internal (not private) so App.xaml.cs's crash handlers can read the session log's tail into
+    // the crash report - the whole point is being able to see what was happening right before an
+    // unhandled exception took the process down.
+    internal static readonly string LogFilePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "azuratemirror_v2_test.log");
 
     // (regex, brush) pairs checked in priority order - fps=green, latency=orange, connected=green,
     // waiting=amber, error/failed/fault=red (claims the rest of the line), timestamp=dim gray.
