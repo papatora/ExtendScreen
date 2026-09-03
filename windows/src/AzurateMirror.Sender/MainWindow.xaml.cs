@@ -27,6 +27,23 @@ public partial class MainWindow : Window
     private volatile bool _modeChanged;
     private volatile bool _keyframeRequested;
     private bool _loggedFirstFrameBytes;
+    // SPS/PPS actually last delivered to the CURRENT client, and whether the next _configSent=false
+    // is from a capture-fault recovery specifically (as opposed to a genuinely new/resumed client
+    // via ApplyClientMode or the keyframe-request path, which always need a real resend regardless
+    // of whether the bytes happen to match - a fresh client has no cached config at all). DXGI
+    // capture faults (e.g. DXGI_ERROR_ACCESS_LOST "keyed mutex abandoned" - a real, recurring
+    // hybrid-GPU/virtual-display quirk, not a bug in this app) force recreating the encoder, which
+    // used to unconditionally resend VIDEO_CONFIG - and Android's onVideoConfig() always does a
+    // full MediaCodec decoder reconfigure, tearing down and recreating the Surface. If it fires
+    // repeatedly in a short window, that repeated reconfigure churn is what actually produced the
+    // ghosted-cursor corruption (same underlying mechanism as the layout-loop bug found earlier,
+    // different trigger). A fresh encoder after a same-resolution recovery almost always emits
+    // byte-identical SPS/PPS, so - only for this specific path - comparing against what the
+    // already-connected client was last actually sent skips the resend (and the Android-side
+    // reconfigure) when nothing really changed.
+    private byte[]? _lastSentSps;
+    private byte[]? _lastSentPps;
+    private bool _configPendingIsRecoveryOnly;
     private MirrorServer? _server;
     // Not volatile - double isn't a valid volatile type in C#. Written from the MirrorServer's
     // read-loop thread, read from the pipeline thread; a briefly stale read is harmless for a
@@ -211,6 +228,7 @@ public partial class MainWindow : Window
         _mode = mode;
         _modeChanged = true;
         _configSent = false;
+        _configPendingIsRecoveryOnly = false; // a real client (re)connect always needs a real send
         _loggedFirstFrameBytes = false;
         AppendLog($"Active mode: {mode}");
     }
@@ -336,6 +354,9 @@ public partial class MainWindow : Window
             SetStatus("Waiting for client...");
 
             _configSent = false;
+            _configPendingIsRecoveryOnly = false;
+            _lastSentSps = null;
+            _lastSentPps = null;
             ulong sessionStartMs = (ulong)Environment.TickCount64;
             int framesThisSecond = 0;
             var fpsTimer = Stopwatch.StartNew();
@@ -359,9 +380,29 @@ public partial class MainWindow : Window
                 {
                     if (!_configSent && encoder.Sps != null && encoder.Pps != null)
                     {
-                        server.SendVideoConfig(duplicator.Width, duplicator.Height, 30, encoder.Sps, encoder.Pps, ts);
-                        _configSent = true;
-                        AppendLog("Sent VIDEO_CONFIG");
+                        bool skipResend = _configPendingIsRecoveryOnly
+                            && _lastSentSps != null && _lastSentPps != null
+                            && encoder.Sps.AsSpan().SequenceEqual(_lastSentSps)
+                            && encoder.Pps.AsSpan().SequenceEqual(_lastSentPps);
+                        _configPendingIsRecoveryOnly = false;
+
+                        if (skipResend)
+                        {
+                            // Recovery-only reconfigure and the client already has this exact
+                            // SPS/PPS - skip the resend so Android doesn't do an unnecessary full
+                            // decoder reconfigure. A genuinely new/resumed client always takes the
+                            // send path below regardless of byte content (see the flag's comment).
+                            _configSent = true;
+                            AppendLog("VIDEO_CONFIG unchanged after recovery, skipped resend");
+                        }
+                        else
+                        {
+                            server.SendVideoConfig(duplicator.Width, duplicator.Height, 30, encoder.Sps, encoder.Pps, ts);
+                            _configSent = true;
+                            _lastSentSps = encoder.Sps;
+                            _lastSentPps = encoder.Pps;
+                            AppendLog("Sent VIDEO_CONFIG");
+                        }
                     }
 
                     foreach (var unit in units)
@@ -433,6 +474,7 @@ public partial class MainWindow : Window
                         encoder.Dispose();
                         encoder = new FrameEncoder(duplicator.Width, duplicator.Height);
                         _configSent = false;
+                        _configPendingIsRecoveryOnly = false; // genuine resume, always needs a real send
                         _loggedFirstFrameBytes = false;
                         if (lastGoodFrame != null)
                         {
@@ -496,6 +538,7 @@ public partial class MainWindow : Window
                     lastGoodFrame?.Dispose();
                     lastGoodFrame = null;
                     _configSent = false;
+                    _configPendingIsRecoveryOnly = true;
                     AppendLog($"Recovered after {attempt} attempt(s). Capture target: {currentOutput.AdapterDescription} [{currentOutput.GdiDeviceName}]");
                     continue;
                 }
