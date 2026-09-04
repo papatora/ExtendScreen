@@ -221,6 +221,34 @@ public partial class MainWindow : Window
         BtnStop.IsEnabled = false;
     }
 
+    /// <summary>Copies the full rolling session log (LogFilePath - every line since this window
+    /// was opened, not just what's currently scrolled into the on-screen RichTextBox) to a file
+    /// the user picks. Meant to be clicked right after a bad connection (black screen/ghosting) so
+    /// that exact moment's log can be saved and compared side-by-side against a log exported from
+    /// a working connection - "does the bad one actually look different" instead of guessing.</summary>
+    private void BtnExportLog_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dialog = new Microsoft.Win32.SaveFileDialog
+            {
+                FileName = $"AzurateMirror_log_{DateTime.Now:yyyyMMdd_HHmmss}.txt",
+                Filter = "Text log (*.txt)|*.txt|All files (*.*)|*.*",
+                DefaultExt = ".txt"
+            };
+            if (dialog.ShowDialog() != true) return;
+
+            System.IO.File.Copy(LogFilePath, dialog.FileName, overwrite: true);
+            AppendLog($"Log exported to {dialog.FileName}");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"Log export failed: {ex.Message}");
+            System.Windows.MessageBox.Show($"Could not export the log: {ex.Message}", "Export failed",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     /// <summary>Applies a mode requested by a newly-connected client - the pipeline loop notices
     /// via _modeChanged and re-targets DesktopDuplicator at the right DXGI output.</summary>
     private void ApplyClientMode(CaptureMode mode)

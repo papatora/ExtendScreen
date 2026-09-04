@@ -28,6 +28,10 @@ public partial class App : System.Windows.Application
     [DllImport("user32.dll")]
     private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+    private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new(-4);
+
     /// <summary>Only one AzurateMirror.Sender process is allowed to run at a time - previously
     /// nothing stopped launching a second instance on top of one already minimized to tray, which
     /// was easy to do by accident (forgetting the first one was still running/mirroring) and left
@@ -40,6 +44,23 @@ public partial class App : System.Windows.Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        // Root cause found live via the app's own log: without an explicit DPI-awareness
+        // declaration, this process's raw GDI calls (EnumDisplaySettings et al, used by
+        // VirtualDisplayManager.FindVirtualOutput) get their reported resolution VIRTUALIZED by
+        // Windows - the virtual display's true native mode (2560x1600) was read back as
+        // 2048x1280 (exactly 1/1.25, the monitor's 125% scaling), every single time. That made
+        // ResolveTargetOutput() think the display was at the wrong resolution and try to
+        // "fix" it via VirtualDisplayManager.SetDisplayMode() on EVERY client (re)connect - a
+        // mode-switch attempt against a display DXGI Desktop Duplication already had an active
+        // handle open on, which is exactly the kind of disruption that produces
+        // DXGI_ERROR_ACCESS_LOST ("keyed mutex abandoned"). That in turn forced a full
+        // encoder/VIDEO_CONFIG/Android-decoder-reconfigure cycle on nearly every connect - the
+        // actual, deterministic (not flaky-GPU) cause of the black-screen/ghosting bug recurring
+        // on every attempt. Declaring Per-Monitor-V2 DPI awareness here, before any GDI call in
+        // the app ever runs, makes those calls report true physical pixels - the display now
+        // reads as already being at its native resolution, so the disruptive "fix" never fires.
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
         // Checked BEFORE base.OnStartup(e): that base call is what actually creates and shows the
         // StartupUri window, so a duplicate instance has to bail out ahead of it - otherwise a
         // second MainWindow briefly exists before Shutdown() tears it back down.

@@ -18,6 +18,8 @@
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
             <Button x:Name="BtnStart" Content="Start" Width="90" Click="BtnStart_Click"/>
             <Button x:Name="BtnStop" Content="Stop" Width="90" Margin="8,0,0,0" Click="BtnStop_Click" IsEnabled="False"/>
+            <Button x:Name="BtnExportLog" Content="Export Log" Width="90" Margin="8,0,0,0" Click="BtnExportLog_Click"
+                    ToolTip="Save the entire session log (from the moment this window opened, not just what's scrolled into view) to a file you pick - grab this right after a black screen/ghosting happens so it can be compared against a log from a working session."/>
             <TextBlock x:Name="TxtStatus" Text="Stopped" Foreground="#4FC3F7" VerticalAlignment="Center" Margin="16,0,0,0" FontSize="14"/>
             <CheckBox x:Name="ChkCloseToTray" Content="Minimize to tray on close (X)" Foreground="#CCC"
                       VerticalAlignment="Center" Margin="24,0,0,0" Checked="ChkCloseToTray_Changed" Unchecked="ChkCloseToTray_Changed"/>
