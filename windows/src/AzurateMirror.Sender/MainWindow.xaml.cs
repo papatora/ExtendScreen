@@ -60,6 +60,23 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        // The actual file write time of the running exe, not the hand-bumped <Version> in the
+        // csproj - a version number only changes when someone remembers to bump it, but this
+        // always reflects exactly which build is actually running. Added after a real case of
+        // confusion this session: the single-instance lock (see App.xaml.cs) means double-
+        // clicking the shortcut while an old instance is still alive/backgrounded just brings
+        // that OLD process to the front instead of launching the newly-built exe - visually
+        // identical, no way to tell without this. Check this line matches the exe's actual
+        // build time (or is at least newer than any fix you're expecting to see) before
+        // concluding a fix didn't work.
+        try
+        {
+            var buildTime = System.IO.File.GetLastWriteTime(System.Reflection.Assembly.GetExecutingAssembly().Location);
+            Title = $"AzurateMirror V2 (build {buildTime:yyyy-MM-dd HH:mm:ss})";
+        }
+        catch { /* title just stays at the XAML default if this fails for any reason */ }
+
         ChkCloseToTray.IsChecked = _appSettings.CloseToTray;
         ChkEnableTouchpad.IsChecked = _appSettings.EnableTouchpad;
         _touchpadGateEnabled = _appSettings.EnableTouchpad;
