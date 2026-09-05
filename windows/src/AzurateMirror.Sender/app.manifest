@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <!--
+    Explicit manifest-level DPI awareness for this WPF app.
+
+    ApplicationHighDpiMode in the .csproj turned out to be a no-op here: that MSBuild property
+    only takes effect by injecting a Application.SetHighDpiMode(...) call into a WinForms-
+    generated Main() - but this project's actual entry point is WPF-generated (App.Main(), per
+    the App.xaml.cs partial class), since UseWPF wins entry-point generation over
+    UseWindowsForms even with both set true (UseWindowsForms here is only for the tray icon's
+    NotifyIcon). No manifest or bootstrap code was ever produced by that property (confirmed:
+    no .manifest file appears anywhere under obj/ after a build), so the DPI-virtualized-
+    resolution bug (VirtualDisplayManager.FindVirtualOutput reading the virtual display's true
+    2560x1600 as 2048x1280 via un-aware GDI calls) kept recurring inconsistently regardless of
+    that setting.
+
+    This is the actual, WPF-correct mechanism: Windows reads and applies dpiAwareness from the
+    embedded manifest at process creation, before any managed code - including the App
+    class's own static initializers - ever runs. Referenced via <ApplicationManifest> in the
+    .csproj.
+  -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>

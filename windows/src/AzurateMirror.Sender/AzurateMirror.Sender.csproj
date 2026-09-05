@@ -11,15 +11,14 @@
     <AssemblyName>AzurateMirror.Sender</AssemblyName>
     <RootNamespace>AzurateMirror.Sender</RootNamespace>
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
-    <!-- Manifest-level DPI awareness, applied by Windows before any process code runs - the
-         App.OnStartup runtime call (SetProcessDpiAwarenessContext) that used to be the only
-         DPI-awareness declaration here was race-prone: if any window/DPI-touching API ran during
-         WPF's own internal startup before OnStartup's user code executed, the runtime call would
-         silently fail to take effect, causing GDI resolution reads (FindVirtualOutput) to be
-         virtualized on some launches and not others - exactly the kind of inconsistent black-
-         screen-on-connect behavior this was chasing. This SDK property bakes PerMonitorV2 into
-         the generated manifest instead, which Windows honors unconditionally from process start. -->
-    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- ApplicationHighDpiMode was tried here first and turned out to be a no-op for this
+         project: that property only takes effect via a WinForms-generated Main(), but this
+         app's actual entry point is WPF-generated (UseWPF wins entry-point generation over
+         UseWindowsForms, which here is only for the tray icon's NotifyIcon) - confirmed no
+         manifest was ever produced under obj/ with it set. app.manifest (referenced below) is
+         the mechanism that's actually correct for a WPF app: Windows applies dpiAwareness from
+         the embedded manifest at process creation, before any managed code runs. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <Version>0.2.3</Version>
     <AssemblyVersion>0.2.3.0</AssemblyVersion>
     <FileVersion>0.2.3.0</FileVersion>
