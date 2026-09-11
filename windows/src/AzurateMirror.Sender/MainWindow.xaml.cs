@@ -769,16 +769,44 @@ public partial class MainWindow : Window
 
     private static readonly System.Windows.Media.Brush DefaultLogBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0xDD, 0xDD, 0xDD));
 
+    // On-screen line cap - the full history always still goes to LogFilePath on disk (and is
+    // exportable via Export Log) regardless of this; this only bounds how many Paragraph blocks
+    // the RichTextBox itself has to hold and re-layout, which gets progressively slower as it
+    // grows over a long-running session. Trimmed periodically rather than every call to keep
+    // this cheap during a burst of rapid log lines (e.g. a reconnect storm).
+    private const int MaxOnScreenLogLines = 2000;
+
     private void AppendLog(string line)
     {
         string stamped = $"[{DateTime.Now:HH:mm:ss.fff}] {line}";
         try { System.IO.File.AppendAllText(LogFilePath, stamped + "\n"); } catch { }
-        Dispatcher.Invoke(() =>
+        // BeginInvoke (async/non-blocking), not Invoke - a burst of log lines from a background
+        // thread (e.g. the network accept thread during a reconnect storm) used to call the
+        // blocking Dispatcher.Invoke() for every single line, so if the UI thread fell behind
+        // processing them (RichTextBox insert cost grows with document size, and this document
+        // was never trimmed - it just kept growing over this app's entire runtime, days in one
+        // observed case), the calling thread blocked too - including MirrorServer's own accept
+        // loop, which could then stall accepting/handling new connections. BeginInvoke queues the
+        // update and returns immediately regardless of how backed up the UI thread is.
+        Dispatcher.BeginInvoke(() =>
         {
             var para = new System.Windows.Documents.Paragraph();
             foreach (var (text, brush) in SplitIntoColoredSpans(stamped))
                 para.Inlines.Add(new System.Windows.Documents.Run(text) { Foreground = brush });
             TxtLog.Document.Blocks.Add(para);
+
+            if (TxtLog.Document.Blocks.Count > MaxOnScreenLogLines)
+            {
+                int toRemove = TxtLog.Document.Blocks.Count - MaxOnScreenLogLines;
+                var block = TxtLog.Document.Blocks.FirstBlock;
+                for (int i = 0; i < toRemove && block != null; i++)
+                {
+                    var next = block.NextBlock;
+                    TxtLog.Document.Blocks.Remove(block);
+                    block = next;
+                }
+            }
+
             TxtLog.ScrollToEnd();
         });
     }
